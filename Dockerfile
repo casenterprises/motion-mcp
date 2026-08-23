@@ -1,8 +1,14 @@
 FROM node:20-alpine
 
-RUN npm install -g supergateway @rf-d/motion-mcp
+WORKDIR /app
+
+# Install the Motion MCP server globally
+RUN npm install -g @rf-d/motion-mcp
+
+# Copy the custom bridge script
+COPY bridge.js .
 
 ENV PORT=8000
 EXPOSE 8000
 
-CMD supergateway --stdio "MOTION_API_KEY=${MOTION_API_KEY} npx -y @rf-d/motion-mcp" --port ${PORT} --cors
+CMD node bridge.js
