@@ -13,4 +13,4 @@ ENV PATH="/opt/mcp-proxy/bin:$PATH"
 ENV PORT=8000
 EXPOSE 8000
 
-CMD mcp-proxy --host=0.0.0.0 --port=8000 --allow-origin='*' --env MOTION_API_KEY -- motion-mcp
+CMD mcp-proxy --host=0.0.0.0 --port=8000 --allow-origin='*' --pass-environment -- motion-mcp
