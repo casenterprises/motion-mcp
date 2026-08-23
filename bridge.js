@@ -13,8 +13,9 @@ const sessions = new Map();
 
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Credentials', 'false');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -24,7 +25,7 @@ const server = http.createServer((req, res) => {
 
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok' }));
+    res.end(JSON.stringify({ status: 'ok', sessions: sessions.size }));
     return;
   }
 
@@ -42,8 +43,15 @@ const server = http.createServer((req, res) => {
   res.end('Not found');
 });
 
+function getBaseUrl(req) {
+  const protocol = req.headers['x-forwarded-proto'] || 'http';
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+  return `${protocol}://${host}`;
+}
+
 function handleSSE(req, res) {
   const sessionId = Math.random().toString(36).substring(2, 15);
+  const baseUrl = getBaseUrl(req);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -51,46 +59,53 @@ function handleSSE(req, res) {
     'Connection': 'keep-alive',
   });
 
-  // Spawn a fresh stdio process for this session
-  const child = spawn('npx', ['-y', '@rf-d/motion-mcp'], {
+  const child = spawn('motion-mcp', [], {
     env: { ...process.env, MOTION_API_KEY },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   sessions.set(sessionId, { child, res });
+  console.log(`Session ${sessionId} started`);
 
-  // Send endpoint event
-  const messageUrl = `/message?session=${sessionId}`;
+  const messageUrl = `${baseUrl}/message?session=${sessionId}`;
   res.write(`event: endpoint\ndata: ${messageUrl}\n\n`);
 
-  // Forward stdout lines to SSE events
   let buffer = '';
   child.stdout.on('data', (data) => {
     buffer += data.toString();
     const lines = buffer.split('\n');
     buffer = lines.pop();
     for (const line of lines) {
-      if (line.trim()) {
-        res.write(`data: ${line}\n\n`);
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith('{')) {
+        res.write(`data: ${trimmed}\n\n`);
+      } else {
+        console.log(`[child stdout non-json] ${trimmed}`);
       }
     }
   });
 
-  // Log stderr
   child.stderr.on('data', (data) => {
-    console.error(`[child] ${data.toString().trim()}`);
+    console.error(`[child stderr] ${data.toString().trim()}`);
   });
 
-  // Clean up on disconnect
   req.on('close', () => {
-    child.kill();
+    console.log(`Session ${sessionId} closed by client`);
+    child.kill('SIGTERM');
     sessions.delete(sessionId);
-    console.log(`Session ${sessionId} closed`);
   });
 
-  child.on('exit', () => {
-    res.end();
+  child.on('error', (err) => {
+    console.error(`[child error] ${err.message}`);
     sessions.delete(sessionId);
+    res.end();
+  });
+
+  child.on('exit', (code, signal) => {
+    console.log(`[child exit] code=${code} signal=${signal}`);
+    sessions.delete(sessionId);
+    res.end();
   });
 }
 
@@ -100,7 +115,7 @@ function handleMessage(req, res) {
   const session = sessions.get(sessionId);
 
   if (!session) {
-    res.writeHead(404);
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Session not found');
     return;
   }
@@ -108,9 +123,17 @@ function handleMessage(req, res) {
   let body = '';
   req.on('data', (chunk) => { body += chunk; });
   req.on('end', () => {
-    session.child.stdin.write(body + '\n');
-    res.writeHead(202);
-    res.end('Accepted');
+    console.log(`[message] session=${sessionId} body=${body.substring(0, 200)}`);
+    try {
+      JSON.parse(body);
+      session.child.stdin.write(body + '\n');
+      res.writeHead(202, { 'Content-Type': 'text/plain' });
+      res.end('Accepted');
+    } catch (err) {
+      console.error(`[message] Invalid JSON: ${err.message}`);
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Bad Request: Invalid JSON');
+    }
   });
 }
 
